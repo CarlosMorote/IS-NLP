@@ -1,0 +1,535 @@
+---
+title: "R Notebook"
+author: "Carlos Morote García"
+output: html_notebook
+---
+
+Data Exploration to understand the data
+
+```{r}
+# Load of all the libraries
+
+set.seed(957735)
+
+library(data.table)
+#library(tm)
+#library(ggplot2)
+#library(ggwordcloud)
+library(keras)
+#library(tensorflow)
+#library(plotly)
+#library(htmlwidgets)
+#library(IRdisplay)
+library(hunspell)
+#library(gridExtra)
+#library(DT)
+library(qdap)
+
+library(utf8)
+library(dplyr)
+library(spacyr)
+library(quanteda)
+library(quanteda.textmodels)
+library(quanteda.textplots)
+
+library(tm)
+
+source("./helper.R")
+```
+
+Once the libraries are loaded we load the data
+
+```{r}
+df.train <- fread("./data/train.csv")
+df.train$id <- NULL
+df.train$keyword <- NULL
+df.train$location <- NULL
+df.train = df.train[df.train$target != ""] # Remove those instances that has is class as NA
+df.train$target <- as.factor(df.train$target)
+```
+
+```{r}
+df.test <- fread("./data/test.csv")
+df.test$id <- NULL
+df.test$keyword <- NULL
+df.test$location <- NULL
+```
+
+
+```{r}
+summary(df.train)
+```
+
+Check it the codification is properlly done in _utf-8_
+
+```{r}
+df.train$text[!utf8_valid(df.train$text)]
+```
+
+Normalize the text
+
+```{r}
+NFC_df <- utf8_normalize(df.train$text)
+sum(NFC_df != df.train$text) # It is normalized
+```
+
+
+Study how many spelling errors there are across the tweets. There are 24308 spelling errors. This may include: urls, emojis, hashtags (#) and mentions to other accounts (@).
+
+```{r}
+# Detects spelling errors
+
+summary(unlist(strsplit(as.character(df.train$text), split = " ")) %>%
+hunspell_check() )
+```
+
+```{r}
+df.corpus.original <- Corpus(VectorSource(df.train$text))
+```
+
+
+All to lower casses
+
+```{r}
+df.corpus <- tm_map(df.corpus.original, content_transformer(tolower))
+```
+
+
+Remove the character `#`
+
+```{r}
+# 1
+df.corpus <- tm_map(df.corpus, content_transformer(function(text){gsub("[#]{1,}([A-Z][^A-Z]*)+", "\\1", text)}))
+```
+
+Remove the mentions (`@`)
+
+```{r}
+# 32
+df.corpus <- tm_map(df.corpus, content_transformer(function(text){gsub("@\\S+ ", "", text)}))
+```
+
+
+Remove urls
+
+```{r}
+# 32
+df.corpus <- tm_map(df.corpus, content_transformer(function(text){gsub("\\S*http+\\S*", "", text)}))
+```
+
+Remove emojis
+
+```{r}
+# 40
+df.corpus <- tm_map(df.corpus, content_transformer(function(text){mgsub(text, pattern = emojis, replacement = "")}))
+```
+
+Undo the contractions
+
+```{r}
+df.corpus <- tm_map(df.corpus, content_transformer(function(text){replace_contraction(text, contraction = contra, sent.cap = FALSE)}))
+```
+
+Basic final transormations
+
+```{r}
+df.corpus <- tm_map(df.corpus, content_transformer(removeNumbers))
+df.corpus <- tm_map(df.corpus, content_transformer(removeWords), stopwords())
+df.corpus <- tm_map(df.corpus, content_transformer(removePunctuation))
+df.corpus <- tm_map(df.corpus, content_transformer(stripWhitespace))
+df.corpus <- tm_map(df.corpus, content_transformer(stemDocument))
+```
+
+Contrast the original corpus to the processed one
+
+```{r}
+df.corpus.original[['32']][['content']]
+df.corpus[['32']][['content']]
+```
+
+TDM
+
+```{r}
+tdm <- TermDocumentMatrix(df.corpus, control = list(weighting = weightTfIdf))
+tdm
+```
+
+Most common words
+
+```{r}
+frecuencias <- rowSums(as.matrix(tdm))
+plot(sort(frecuencias, decreasing = TRUE))
+```
+
+```{r}
+tail(sort(frecuencias),n=10)
+```
+
+```{r}
+dfm <- 
+multi <- textmodel_nb(dfmat_train,
+                      dfmat_train$polarity,
+                      distribution = 'Bernoulli')
+```
+
+
+---
+
+Model (Ahora sí)
+
+```{r}
+text <- unlist(df.corpus)
+
+text <- as.data.frame(text)
+
+text <- text[1:(nrow(text)-1), ]
+text <- as.data.frame(text)
+tail(text)
+
+val <- data.frame(df.train$target, text$text)
+colnames(val) <- c("target", "text")
+head(val)
+```
+
+```{r}
+ttPart <- .7
+u <- runif(n = nrow(val), min = 0, max = 1)
+
+tr_val <- val[u <= ttPart,]
+te_val <- val[u > ttPart,]
+```
+
+```{r}
+voc_size <- tr_val$text %>%
+                as.character() %>%
+                    paste(., collapse = " ") %>%
+                        strsplit(., split = " ") %>%
+                            unlist() %>%
+                                factor() %>%
+                                    unique() %>%
+                                        length()
+
+tokenizer <- text_tokenizer(num_words = voc_size)
+tokenizer %>%  fit_text_tokenizer(tr_val$text)
+tokenizer$word_index %>% head(., n=6)
+```
+
+```{r}
+text_seqs_val_tr <- texts_to_sequences(tokenizer, tr_val$text)
+text_seqs_val_te <- texts_to_sequences(tokenizer, te_val$text)
+```
+
+```{r}
+inputShape = 120
+
+x_train <- text_seqs_val_tr %>% pad_sequences(maxlen = inputShape, padding = "post")
+x_test <- text_seqs_val_te %>% pad_sequences(maxlen = inputShape, padding = "post")
+dim(x_train); dim(x_test)
+```
+
+```{r}
+y_train <- tr_val$target
+length(y_train)
+```
+
+```{r}
+batch_size = 128
+eps = 45
+latent_size = 3
+clip = 3
+leRa = .0025
+dec = .00001
+```
+
+```{r}
+ENCODER_in <- layer_input(shape = c(inputShape))
+ENCODER_out = ENCODER_in %>%
+  layer_embedding(input_dim = voc_size, 
+                  output_dim = 30) %>%
+  layer_dropout(.2) %>%
+  layer_global_max_pooling_1d() %>%
+  layer_batch_normalization() %>%
+  layer_dense(units=120) %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_dense(units=60) %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_dense(units=latent_size) %>% 
+  layer_activation_leaky_relu()
+ENCODER = keras_model(ENCODER_in, ENCODER_out)
+summary(ENCODER)
+
+DECODER_in = layer_input(shape = latent_size)
+DECODER_out = DECODER_in %>% 
+  layer_batch_normalization() %>%
+  layer_dense(units=60) %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_dense(units=120) %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_dense(units = inputShape, activation = "relu") # Because output must be >= 0
+DECODER = keras_model(DECODER_in, DECODER_out)
+summary(DECODER)
+```
+
+```{r}
+AEN_in = layer_input(shape = inputShape)
+AEN_out = AEN_in %>% 
+  ENCODER() %>% 
+  DECODER()
+   
+AEN = keras_model(AEN_in, AEN_out)
+summary(AEN)
+```
+
+```{r}
+rmse <- function(y_pred, y_true){
+  y_pred = k_cast(y_pred, dtype="float32")
+  y_true = k_cast(y_true, dtype="float32")
+  rmse = k_sqrt(k_mean(k_square(y_pred - y_true), axis=-1)) 
+  return(rmse)
+}
+```
+
+```{r}
+AEN %>% keras::compile(
+  loss = rmse,
+  optimizer = optimizer_adamax(beta_2 = .95, learning_rate = leRa, decay = dec),
+  metrics = c('accuracy')
+)
+```
+
+```{r}
+stop <- callback_early_stopping(monitor = 'accuracy', patience = 10, restore_best_weights = T)
+```
+
+```{r}
+hist <- AEN %>%
+  fit(
+    x_train,
+    y_train,
+    batch_size = batch_size,
+    epochs = eps,
+    callbacks = c(stop)
+  )
+```
+
+```{r}
+encoded = ENCODER %>% 
+    predict(x_train)
+```
+
+```{r}
+decoded = DECODER %>% 
+    predict(encoded) %>% 
+        as.data.frame()
+
+head(decoded)
+```
+
+```{r}
+encodedTest = ENCODER %>% 
+    predict(x_test) %>% 
+        as.data.frame()
+encodedTest$split <- "validation"
+```
+
+
+---
+
+We check again the detected spelling errors. We can conclude that there where reduce drastically.
+
+```{r}
+summary(unlist(strsplit(as.character(df.corpus), split = " ")) %>% # CUIDADO
+hunspell_check() )
+```
+
+```{r}
+encoded <- encoded %>% as.data.frame()
+encoded$split <- "train"
+```
+
+```{r}
+encoded <- rbind(encoded, encodedTest)
+```
+
+```{r}
+stop1 <- callback_early_stopping(monitor = 'val_loss', patience = 7)
+stop2 <- callback_early_stopping(monitor = 'val_loss', patience = 4)
+stop3 <- callback_early_stopping(monitor = 'val_loss', patience = 7)
+```
+
+```{r}
+batch_size = 32
+```
+
+```{r}
+INPUT1 <- layer_input(shape = c(inputShape))
+INPUT2 <- layer_input(shape = c(inputShape))
+INPUT3 <- layer_input(shape = c(inputShape))
+```
+
+```{r}
+OUTPUT1 <- INPUT1 %>%
+        layer_embedding(input_dim = voc_size, 
+                        output_dim = 6) %>%
+        layer_dropout(.3) %>%
+        bidirectional(layer_lstm(units = 16, 
+                                 return_sequences = TRUE, 
+                                 recurrent_dropout = .4,
+                                 activation = "selu",
+                                 kernel_initializer='lecun_normal')) %>%
+        bidirectional(layer_lstm(units = 10, 
+                                 return_sequences = FALSE, 
+                                 recurrent_dropout = .35,
+                                 activation = "elu")) %>%
+
+        layer_dense(units = 1, activation = "sigmoid")
+
+OUTPUT2.0 <- INPUT2 %>%
+        layer_embedding(input_dim = voc_size, 
+                        output_dim = 10) %>%
+        layer_dropout(.4) %>%
+
+        layer_global_max_pooling_1d() 
+
+OUTPUT2.1 <- OUTPUT2.0 %>%
+        layer_dense(units = 16) %>%
+        layer_activation_leaky_relu() %>%
+        layer_dropout(.4) %>%
+        layer_batch_normalization() 
+
+OUTPUT2.2 <- OUTPUT2.1 %>%
+        layer_dense(units = 16) %>%
+        layer_activation_leaky_relu() %>%
+        layer_dropout(.4) %>%
+        layer_batch_normalization() 
+
+OUTPUT2 <- layer_average(list(OUTPUT2.1, OUTPUT2.2)) %>%
+
+        layer_dense(units = 10) %>%
+        layer_activation_leaky_relu() %>% 
+        layer_dropout(.3) %>%
+        layer_batch_normalization() %>%
+
+        layer_dense(units = 1, activation = "sigmoid")
+
+OUTPUT3 <- INPUT3 %>%
+        layer_embedding(input_dim = voc_size, 
+                        output_dim = 10) %>%
+        layer_dropout(.35) %>%
+
+        layer_conv_1d(filters = 8, 
+                      kernel_size = 4, 
+                      strides = 1, 
+                      padding = "same") %>%
+        layer_activation_leaky_relu() %>% 
+        layer_batch_normalization() %>%
+        layer_dropout(.35) %>%
+
+        layer_conv_1d(filters = 16, 
+                      kernel_size = 3, 
+                      strides = 1, 
+                      padding = "same") %>%
+        layer_activation_leaky_relu() %>% 
+        layer_batch_normalization() %>%
+        layer_dropout(.35) %>%
+
+        layer_conv_1d(filters = 24, 
+                      kernel_size = 2, 
+                      strides = 1, 
+                      padding = "same") %>%
+        layer_batch_normalization() %>%
+        layer_activation_leaky_relu() %>% 
+        layer_dropout(.35) %>%
+
+        layer_flatten() %>%
+
+        layer_dense(units = 1, activation = "sigmoid")
+```
+
+```{r}
+model1 <- keras_model(INPUT1, OUTPUT1)
+model2 <- keras_model(INPUT2, OUTPUT2)
+model3 <- keras_model(INPUT3, OUTPUT3)
+```
+
+```{r}
+summary(model1); summary(model2); summary(model3)
+```
+
+```{r}
+mom = .9
+clip = 3
+leRa = .0025
+dec = .00001
+```
+
+```{r}
+model1 %>% keras::compile(
+  loss = tf$losses$BinaryCrossentropy(label_smoothing = 0),
+  optimizer = optimizer_adamax(beta_2 = .95, learning_rate = leRa, decay = dec),
+  metrics = 'accuracy'
+)
+
+model2 %>% keras::compile(
+  loss = tf$losses$BinaryCrossentropy(label_smoothing = 0),
+  optimizer = optimizer_adamax(beta_2 = .95, learning_rate = leRa, decay = dec),
+  metrics = 'accuracy'
+)
+
+model3 %>% keras::compile(
+  loss = tf$losses$BinaryCrossentropy(label_smoothing = 0),
+  optimizer = optimizer_adam(beta_2 = .95, learning_rate = leRa + .0015, decay = dec),
+  metrics = 'accuracy'
+)
+```
+
+```{r}
+eps = 45
+```
+
+```{r}
+hist1 <- model1 %>%
+  fit(
+    x_train,
+    y_train,
+    batch_size = batch_size,
+    epochs = eps,
+    validation_split = 0.3,
+    callbacks = c(stop1)
+  )
+
+hist2 <- model2 %>%
+  fit(
+    x_train,
+    y_train,
+    batch_size = batch_size,
+    epochs = eps,
+    validation_split = 0.3,
+    callbacks = c(stop2)
+  )
+
+hist3 <- model3 %>%
+  fit(
+    x_train,
+    y_train,
+    batch_size = batch_size,
+    epochs = eps,
+    validation_split = 0.3,
+    callbacks = c(stop3)
+  )
+```
+
+
+---
+
+https://www.kaggle.com/barun2104/nlp-with-disaster-eda-dfm-svd-ensemble
+
+```{r}
+dfm.train <- dfm(corpus(df.corpus))
+# dfm.test <- dfm(df_test$text)
+
+model.svm <- textmodel_svm(dfm.train, df.train$text)
+nb <- textmodel_nb(df.train, df.train$text)
+
+predictions <- predict(model.svm, newdata=dfm.train)
+```
