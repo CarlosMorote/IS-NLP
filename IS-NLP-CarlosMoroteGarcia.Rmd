@@ -1,0 +1,424 @@
+---
+title: Natural Language Processing with Disaster Tweets. Analysis and classification
+  prediction
+author: "Carlos Morote García"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+# 0. Preliminaries 
+
+Check if the libraries that are going to be used along this library are installed. In case it is detected that one is not installed, it will be installed automatically.
+
+```{r}
+source("./requirements.R")
+```
+
+&nbsp;
+
+Once we have made sure that the libraries have been installed, they will be imported in order to run the rest of the notebook. 
+
+```{r}
+# Load of all the libraries
+
+library(data.table)
+library(hunspell)
+library(qdap)
+
+library(utf8)
+library(dplyr)
+library(quanteda)
+library(quanteda.textmodels)
+library(quanteda.textplots)
+
+library(wordcloud)
+library(tm)
+library(caret)
+```
+
+&nbsp;
+
+We will load the variables, lists and functions defined in the `healpers.R` file. This is done in an external file to keep the notebook as readable as possible.
+
+```{r}
+source("./helper.R")
+```
+
+&nbsp;
+
+Finally, we will establish a seed to control the generation of numerous random samples in order to make the experiments reproducible.
+
+```{r}
+set.seed(957735)
+```
+
+&nbsp;
+
+# 1. Import data
+
+We load the data sets, both the training set (for which we know the classification) and the test set (for which we do not know the classification). 
+
+```{r}
+df.train <- fread("./data/train.csv")
+df.test <- fread("./data/test.csv")
+```
+
+&nbsp;
+
+As this work is intended to explore natural language processing, we will eliminate those variables that are not related. In this case we eliminate for both data sets: `keyword` and `location`.
+
+```{r}
+# Train dataset
+df.train$id <- NULL
+df.train$keyword <- NULL
+df.train$location <- NULL
+
+# Test dataset
+df.test$keyword <- NULL
+df.test$location <- NULL
+```
+
+&nbsp;
+
+Cast the target variable into a factor
+
+```{r}
+df.train$target <- as.factor(df.train$target)
+```
+
+&nbsp;
+
+Analyzing very superficially the resulting DataFrame we observe that there are almost a thousand more cases where the tweet does not correspond to a natural disaster.
+
+```{r}
+summary(df.train)
+```
+
+&nbsp;
+
+We check if the character encoding is correct (_utf-8_). In this case we check that it is in this format.
+
+```{r}
+df.train$text[!utf8_valid(df.train$text)]
+```
+
+```{r}
+NFC_df <- utf8_normalize(df.train$text)
+sum(NFC_df != df.train$text) # It is normalized
+```
+
+```{r}
+NFC_df <- utf8_normalize(df.test$text)
+sum(NFC_df != df.test$text) # It is normalized
+```
+
+&nbsp;
+
+# 2. Data and Corpus preprocessing
+
+In this section we will generate the corpus for the training and test datasets. We will also process these corpus to make them ready and clean to be analyzed by the subsequent models. Additionally, these corpus will be used to perform a basic analysis of the texts.
+
+Before we start we will use the `hunspell` library to detect grammatical errors in the text. We perform this check since these texts come from Twitter and since they are not formal texts, but texts from various sources, it is more than likely that there are multiple grammatical errors. In addition, on Twitter, due to the limited number of characters that can be used per tweet, we have to cut words or use contributions that are not grammatically correct.
+
+The results provided by this method are given in a table format where TRUE means that **no** error exists, while FALSE means that **yes** error exists. Each value corresponds to a word. This notebook considers as a word any sequence of characters separated by a space.
+
+We note that 24308 out of 113650 words have some grammatical error. This means that $21\%$ of the words have problems.
+
+
+```{r}
+# Detects spelling errors
+
+summary(unlist(strsplit(as.character(df.train$text), split = " ")) %>%
+hunspell_check() )
+```
+
+&nbsp;
+
+On the other hand, the test data set presents 10703 errors out of 48876 words. This is another $21\%$.
+
+```{r}
+summary(unlist(strsplit(as.character(df.test$text), split = " ")) %>%
+hunspell_check() )
+```
+
+&nbsp;
+
+Next we generate the **Corpus** using the `tm` library method.
+
+```{r}
+df.train.corpus.original <- Corpus(VectorSource(df.train$text))
+df.test.corpus.original <- Corpus(VectorSource(df.test$text))
+```
+
+&nbsp;
+
+First we transform all generated tokens, words in this case, to lowercase.
+
+```{r}
+df.train.corpus <- tm_map(df.train.corpus.original, content_transformer(tolower))
+df.test.corpus <- tm_map(df.test.corpus.original, content_transformer(tolower))
+```
+
+&nbsp;
+
+Twitter has a tag system to allow quick searches by tags, as well as to allow grouping tweets by the same topic. These are the hashtags, which are identified with the hash symbol (#). These tags may contain useful information, but by their nature they tend to group multiple words without spaces, causing the algorithm to detect them as a single one. To extract the maximum knowledge from these tags we have made use of regular expressions by which it will detect the different words within a Hashtag, as long as they are differentiated with the first letter of each word capitalized. Therefore, the hashtag #SpainOnFire would be transformed into the three words that compose them: Spain, On, Fire. Additionally, they will be transformed into lowercase letters to match the transformation previously made.
+
+
+```{r}
+df.train.corpus <- tm_map(df.train.corpus, content_transformer(function(text){gsub("[#]{1,}([A-Z][^A-Z]*)+", "\\1", text)}))
+df.test.corpus <- tm_map(df.test.corpus, content_transformer(function(text){gsub("[#]{1,}([A-Z][^A-Z]*)+", "\\1", text)}))
+```
+
+&nbsp;
+
+The mention of users (made with the @ symbol followed by the user name) is much more difficult to extract the words they may contain. In many cases, nicknames do not correlate with reality, since the original names of people are not unique, many times the numbers are manipulated to create a user name that is unique. Therefore, usernames will be removed from the Corpus.
+
+```{r}
+df.train.corpus <- tm_map(df.train.corpus, content_transformer(function(text){gsub("@\\S+ ", "", text)}))
+df.test.corpus <- tm_map(df.test.corpus, content_transformer(function(text){gsub("@\\S+ ", "", text)}))
+```
+
+&nbsp;
+
+The urls as a text source do not provide any useful information since they could be considered a succession of random characters that only have in common the beginning (_http..._). If one wanted to go deeper into this problem, these links are reverencing an image on the web, therefore, they could be extracted and analyzed with other algorithms in order to generate derived variables. As this is not the object of this work, the latter will not be implemented. Therefore, the urls will be eliminated.
+
+```{r}
+df.train.corpus <- tm_map(df.train.corpus, content_transformer(function(text){gsub("\\S*http+\\S*", "", text)}))
+df.test.corpus <- tm_map(df.test.corpus, content_transformer(function(text){gsub("\\S*http+\\S*", "", text)}))
+```
+
+&nbsp;
+
+As was the case with urls, emojis also do not provide relevant information regarding the text. Hence, they will be removed. The definition of what is an emoji is composed in the `healper.R` file.
+
+```{r}
+df.train.corpus <- tm_map(df.train.corpus, content_transformer(function(text){mgsub(text, pattern = emojis, replacement = "")}))
+df.test.corpus <- tm_map(df.test.corpus, content_transformer(function(text){mgsub(text, pattern = emojis, replacement = "")}))
+```
+
+&nbsp;
+
+Contractions are often treated as a single token when in fact they represent two or more tokens. They are also often treated as different tokens but on their contracted version. This means for example that it will differentiate between the _is_ token and the _'s_ token (from _He's_ for example).
+To solve this, a list of equivalences of a contraction with its extended version has been made. Based on these references the captured contractions have been discarded.
+
+```{r}
+df.train.corpus <- tm_map(df.train.corpus, content_transformer(function(text){replace_contraction(text, contraction = contra, sent.cap = FALSE)}))
+df.test.corpus <- tm_map(df.test.corpus, content_transformer(function(text){replace_contraction(text, contraction = contra, sent.cap = FALSE)}))
+```
+
+&nbsp;
+
+Finally, a series of typical transformations have been carried out, such as:
+
+ - Eliminating the numbers
+ - Removing characters and words that define the end of a sentence.
+ - Removing punctuation symbols
+ - Removing the necessary sequence of blank characters. That is, between words there is only a single space.
+ - Stem the document
+
+```{r}
+df.train.corpus <- tm_map(df.train.corpus, content_transformer(removeNumbers))
+df.train.corpus <- tm_map(df.train.corpus, content_transformer(removeWords), stopwords())
+df.train.corpus <- tm_map(df.train.corpus, content_transformer(removePunctuation))
+df.train.corpus <- tm_map(df.train.corpus, content_transformer(stripWhitespace))
+df.train.corpus <- tm_map(df.train.corpus, content_transformer(stemDocument))
+
+df.test.corpus <- tm_map(df.test.corpus, content_transformer(removeNumbers))
+df.test.corpus <- tm_map(df.test.corpus, content_transformer(removeWords), stopwords())
+df.test.corpus <- tm_map(df.test.corpus, content_transformer(removePunctuation))
+df.test.corpus <- tm_map(df.test.corpus, content_transformer(stripWhitespace))
+df.test.corpus <- tm_map(df.test.corpus, content_transformer(stemDocument))
+```
+
+&nbsp;
+
+To conclude this section we will contrast the transformations made by comparing an original record against a modified one.
+
+```{r}
+df.train.corpus.original[['32']][['content']]
+df.train.corpus[['32']][['content']]
+```
+
+```{r}
+df.test.corpus.original[['25']][['content']]
+df.test.corpus[['25']][['content']]
+```
+
+&nbsp;
+
+# 3. Term Document Matrix
+
+In this third section we will generate the Term Document Matrix (TDM). We will also analyze the most frequent tokens while eliminating the less frequent tokens to remove irrelevant variables that provide (probably) the least information to our problem.
+
+```{r}
+tdm <- TermDocumentMatrix(df.train.corpus, control = list(weighting = weightTfIdf))
+tdm
+```
+
+&nbsp;
+
+First we will eliminate those tokens that are less frequent.
+
+```{r}
+tdm <- removeSparseTerms(tdm, 0.99)
+tdm
+```
+
+```{r}
+inspect(tdm)
+```
+
+&nbsp;
+
+We will also visualize in a scatter plot the frequency of all variables. In this way we can study if there is a big difference between the most frequent variables and the less frequent ones.
+We can clearly see that there is such a differentiation. There are a handful of these tokens that are much more frequent than the rest, while the rest seem to be repeated with more or less the same frequency.
+
+```{r}
+frecuencias <- rowSums(as.matrix(tdm))
+plot(sort(frecuencias, decreasing = TRUE))
+```
+
+&nbsp;
+
+We list these tokens more frequently. We note that we are dealing with words related to natural disasters such as fire, flood or, directly, disaster.
+
+```{r}
+tail(sort(frecuencias),n=20)
+```
+
+&nbsp;
+
+We also make use of the word cloud graph to visualize the frequency of these words.
+
+```{r}
+freq = data.frame(sort(rowSums(as.matrix(tdm)), decreasing=TRUE))
+wordcloud(rownames(freq), freq[,1], max.words=50, colors=brewer.pal(1, "Dark2"))
+```
+
+&nbsp;
+
+# 4. Modeling and evaluation
+
+In this final section we will create the models that will be in charge of discerning whether a text corresponds to a natural disaster or not. For this we will make use of the models provided by the `quanteda.textmodels` library:
+
+ - SVM Linear
+ - SVM
+ - Naive Bayes
+ 
+&nbsp;
+
+This library requires the information to be in a specific format. Therefore, before starting with the models, the corpus will be converted to a document-feature matrix. At the same time that we do this conversion we will generate two data sets (train and test) based on the set from which we know the predictions. Then we will be able to evaluate our models. The division will be 70% for training and the remaining 30% for testing.
+
+```{r}
+upper.bound <- round(length(df.train.corpus)*0.7,0)
+dfm.train.train <- dfm(corpus(df.train.corpus)[1:upper.bound])
+dfm.train.test <- dfm(corpus(df.train.corpus)[upper.bound:length(corpus(df.train.corpus))])
+```
+
+&nbsp;
+
+First we will use the `textmodel_svm` model. The way to proceed with the models will always be the same. The model will be trained, then the predictions will be generated with the saved data to obtain an evaluation of the model. Finally, we will obtain a series of metrics that will inform us how well our model generalizes.
+
+
+```{r}
+model.svm <- textmodel_svm(dfm.train.train, df.train$target[1:upper.bound])
+
+predictions.svm <- predict(model.svm, newdata=dfm.train.test)
+
+tab_class <- table(df.train$target[upper.bound:length(corpus(df.train.corpus))], predictions.svm)
+confusionMatrix(tab_class, mode = "everything")
+```
+
+&nbsp;
+
+We continue by analyzing the `textmodel_svmlin` model. The results obtained with this model are worse in all metrics than the previously trained support vector machine.
+
+```{r}
+model.svmlin <- textmodel_svmlin(dfm.train.train, df.train$target[1:upper.bound])
+
+predictions.svmlin <- predict(model.svmlin, newdata=dfm.train.test, force = T)
+
+tab_class <- table(df.train$target[upper.bound:length(corpus(df.train.corpus))], predictions.svmlin)
+confusionMatrix(tab_class, mode = "everything")
+```
+
+&nbsp;
+
+Finally we tried to train a simpler model such as a Naive Bayes model (`textmodel_nb`).  
+
+We observe that it is the model with the best results so far. Moreover, it has the advantage of being a much simpler model than SVMs and it is also interpretable.
+
+```{r}
+model.nb <- textmodel_nb(dfm.train.train, df.train$target[1:upper.bound])
+
+predictions.nb <- predict(model.nb, newdata=dfm.train.test, force = T)
+
+tab_class <- table(df.train$target[upper.bound:length(corpus(df.train.corpus))], predictions.nb)
+confusionMatrix(tab_class, mode = "everything")
+```
+
+---
+
+Finally we are going to use the whole training data set (`df.train`) to train the models again. In this way we will be able to generate the predictions with the data set of which we do not know its classification. After generating these predictions we will be able to upload them to the Kaggle competition from which this information comes from and thus know its accuracy.
+
+```{r}
+dfm.train <- dfm(corpus(df.train.corpus))
+dfm.test <- dfm(corpus(df.test.corpus))
+
+model.svm <- textmodel_svm(dfm.train, df.train$target)
+model.svmlin <- textmodel_svmlin(dfm.train, df.train$target)
+model.nb <- textmodel_nb(dfm.train, df.train$target)
+
+predictions.svm <- predict(model.svm, newdata=dfm.test)
+predictions.svmlin <- predict(model.svmlin, newdata=dfm.test, force = T)
+predictions.nb <- predict(model.nb, newdata=dfm.test, force = T)
+```
+
+&nbsp;
+
+Once we compute all the predicions we generate a _csv_ file to submitt to Kaggle.
+
+```{r}
+df.test.svm <- data.frame(
+  id = df.test$id,
+  target = predictions.svm
+)
+
+df.test.svmlin <- data.frame(
+  id = df.test$id,
+  target = predictions.svmlin
+)
+
+df.test.nb <- data.frame(
+  id = df.test$id,
+  target = predictions.nb
+)
+```
+
+```{r}
+write.csv(df.test.svm,
+           "./output/svm.test.csv",
+           sep = ",",
+           col.names = T,
+           row.names = F)
+
+write.csv(df.test.svmlin,
+           "./output/svmlin.test.csv",
+           sep = ",",
+           col.names = T,
+           row.names = F)
+
+write.csv(df.test.nb,
+           "./output/nb.test.csv",
+           sep = ",",
+           col.names = T,
+           row.names = F)
+```
+
+The accuracy of the submited models are: 
+
+ - **SVM**: 0.77597
+ - **SVM Linear**: 0.62212
+ - **Naive Bayes (nb)**: 0.78915
+
