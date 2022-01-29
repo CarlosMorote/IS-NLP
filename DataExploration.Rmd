@@ -23,6 +23,7 @@ library(quanteda.textmodels)
 library(quanteda.textplots)
 
 library(tm)
+library(caret)
 
 source("./helper.R")
 ```
@@ -187,17 +188,39 @@ tail(sort(frecuencias),n=20)
 
 
 ```{r}
-dfm.train <- dfm(corpus(df.train.corpus))
-dfm.test <- dfm(corpus(df.test.corpus))
-
-model.svm <- textmodel_svm(dfm.train, df.train$target)
-model.svmlin <- textmodel_svmlin(dfm.train, df.train$target)
-model.nb <- textmodel_nb(dfm.train, df.train$target)
-
-predictions.svm <- predict(model.svm, newdata=dfm.test)
-predictions.svmlin <- predict(model.svmlin, newdata=dfm.test, force = T)
-predictions.nb <- predict(model.nb, newdata=dfm.test, force = T)
+upper.bound <- 5000
+dfm.train.train <- dfm(corpus(df.train.corpus)[1:upper.bound])
+dfm.train.test <- dfm(corpus(df.train.corpus)[upper.bound:length(corpus(df.train.corpus))])
 ```
+
+```{r}
+model.svm <- textmodel_svm(dfm.train.train, df.train$target[1:upper.bound])
+
+predictions.svm <- predict(model.svm, newdata=dfm.train.test)
+
+tab_class <- table(df.train$target[upper.bound:length(corpus(df.train.corpus))], predictions.svm)
+confusionMatrix(tab_class, mode = "everything")
+```
+
+```{r}
+model.svmlin <- textmodel_svmlin(dfm.train.train, df.train$target[1:upper.bound])
+
+predictions.svmlin <- predict(model.svmlin, newdata=dfm.train.test, force = T)
+
+tab_class <- table(df.train$target[upper.bound:length(corpus(df.train.corpus))], predictions.svmlin)
+confusionMatrix(tab_class, mode = "everything")
+```
+
+```{r}
+model.nb <- textmodel_nb(dfm.train.train, df.train$target[1:upper.bound])
+
+predictions.nb <- predict(model.nb, newdata=dfm.train.test, force = T)
+
+tab_class <- table(df.train$target[upper.bound:length(corpus(df.train.corpus))], predictions.nb)
+confusionMatrix(tab_class, mode = "everything")
+```
+
+/TODO: ustilizar todo el df para entrenar y generar test final
 
 ```{r}
 df.test.svm <- data.frame(
