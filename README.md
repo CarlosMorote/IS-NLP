@@ -37,3 +37,6 @@ IS-NLP
 ## Steps to run the script
  1. Create the file and folder structure as described in the previous section.
  2. Run the R Notebook throw RStudio. (No further enviroment is required)
+
+## Code
+ The code can be found [here](https://github.com/CarlosMorote/IS-NLP).
