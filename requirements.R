@@ -12,4 +12,4 @@ packages <- c('data.table',
               'caret',
               'wordcloud')
 
-install.packages(setdiff(packages, rownames(installed.packages())))  
+install.packages(setdiff(packages, rownames(installed.packages())), repos = 'https://cran.rediris.es/')  
